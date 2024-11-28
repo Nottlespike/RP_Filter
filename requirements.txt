@@ -1,0 +1,4 @@
+aiohttp>=3.9.1
+numpy>=1.24.3
+tqdm>=4.66.1
+tenacity>=8.2.3
