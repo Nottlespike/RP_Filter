@@ -71,9 +71,6 @@ python dataset_filter.py \
 ## Requirements
 
 - Python 3.7+
-- aiohttp
-- tqdm
-- pydantic
 
 ## Error Handling
 
