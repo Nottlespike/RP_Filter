@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException, Path
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError, field_validator
 import logging
-from tqdm.asyncio import tqdm
+from tqdm.asyncio import tqdm, tqdm_asyncio
 import numpy as np
 from tenacity import retry, stop_after_attempt, wait_exponential
 import argparse
@@ -82,13 +82,12 @@ class QualityMetrics:
     vocabulary_diversity: float
     purple_prose_score: float
     context_utilization: float
-    context_utilization: float
     final_score: float
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
-            )
+)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
@@ -173,10 +172,10 @@ The conversation to evaluate follows:"""
                 purple_prose_score=scores['prose_score'],
                 context_utilization=scores['context_score'],
                 final_score=scores['final_score']
-        )
+            )
         except Exception as e:
-                logger.error(f"Error parsing scores: {e}")
-                return QualityMetrics(0, 0, 0, 0)
+            logger.error(f"Error parsing scores: {e}")
+            return QualityMetrics(0, 0, 0, 0)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     async def evaluate_conversation_api(self, session: aiohttp.ClientSession, conversation: Dict[str, Any]) -> QualityMetrics:
@@ -199,37 +198,38 @@ The conversation to evaluate follows:"""
                     role="system",
                     content=formatted_input,
                     name="quality_evaluator"
-        )
+                )
             ],
             temperature=0.1
         ).model_dump()
 
         try:
-                async with session.post(
-                    f"{self.api_base}/chat/completions",
-                    json=payload,
-                    headers={"Content-Type": "application/json"}
-                ) as response:
-                    if response.status != 200:
-                        error_text = await response.text()
-                        logger.error(f"API error: {error_text}")
-                        return QualityMetrics(0, 0, 0, 0)
-                    
-                    result = await response.json()
-                    api_response = result['choices'][0]['message']['content']
-                    return self.parse_scores(api_response)
+            async with session.post(
+                f"{self.api_base}/chat/completions",
+                json=payload,
+                headers={"Content-Type": "application/json"}
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"API error: {error_text}")
+                    return QualityMetrics(0, 0, 0, 0)
+                
+                result = await response.json()
+                api_response = result['choices'][0]['message']['content']
+                return self.parse_scores(api_response)
         except Exception as e:
-                logger.error(f"Request error: {e}")
-                raise
+            logger.error(f"Request error: {e}")
+            raise
 
     async def process_batch(self, session: aiohttp.ClientSession, batch: List[Dict[str, Any]]) -> List[QualityMetrics]:
         tasks = [self.evaluate_conversation_api(session, conv) for conv in batch]
-        pbar_format = "{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
-        async with tqdm.gather(*tasks, 
-                             desc="Processing conversations",
-                             bar_format=pbar_format,
-                             return_exceptions=True) as results:
+        try:
+            results = await tqdm_asyncio.gather(*tasks, desc="Processing conversations")
             return results
+        except Exception as e:
+            logger.error(f"Batch processing error: {e}")
+            return [QualityMetrics(0, 0, 0, 0) for _ in batch]
+
     async def filter_dataset(self, input_path: str, output_path: str):
         conversations = read_jsonl(input_path)
         
@@ -238,20 +238,13 @@ The conversation to evaluate follows:"""
 
         connector = aiohttp.TCPConnector(limit=self.max_parallel_requests)
         async with aiohttp.ClientSession(connector=connector) as session:
-            for i in range(0, len(conversations), self.batch_size):
-                batch = conversations[i:i + self.batch_size]
-                batch_scores = await self.process_batch(session, batch)
-                
-                processed_scores = []
-                for score in batch_scores:
-                    if isinstance(score, Exception):
-                        logger.error(f"Batch processing error: {score}")
-                        processed_scores.append(QualityMetrics(0, 0, 0, 0))
-                    else:
-                        processed_scores.append(score)
-                
-                scores.extend(processed_scores)
-                logger.info(f"Processed {i + len(batch)}/{len(conversations)} conversations")
+            with tqdm(total=len(conversations), desc="Overall progress") as pbar:
+                for i in range(0, len(conversations), self.batch_size):
+                    batch = conversations[i:i + self.batch_size]
+                    batch_scores = await self.process_batch(session, batch)
+                    scores.extend(batch_scores)
+                    pbar.update(len(batch))
+                    logger.info(f"Processed {i + len(batch)}/{len(conversations)} conversations")
 
         score_threshold = np.percentile(
             [score.final_score for score in scores],
