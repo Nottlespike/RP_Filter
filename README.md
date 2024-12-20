@@ -68,10 +68,6 @@ python dataset_filter.py \
     --verbose
 ```
 
-## Requirements
-
-- Python 3.7+
-
 ## Error Handling
 
 - Failed API calls automatically retry with exponential backoff
